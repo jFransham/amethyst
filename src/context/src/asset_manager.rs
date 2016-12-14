@@ -254,6 +254,38 @@ impl AssetLoader<Mesh> for Vec<VertexPosNormal> {
 }
 
 /// A struct for creating a new texture from raw data
+pub struct RawTextureData<'a> {
+    pub kind: Kind,
+    pub raw: &'a [u8],
+}
+
+impl<'a> AssetLoader<Texture> for RawTextureData<'a> {
+    /// # Panics
+    /// Panics if factory isn't registered as loader.
+    fn from_data(assets: &mut Assets, load_data: Self) -> Option<Texture> {
+        let factory_impl = assets.get_loader_mut::<FactoryImpl>().expect("Unable to retrieve factory");
+        let texture_impl = match *factory_impl {
+            FactoryImpl::OpenGL { ref mut factory } => {
+                let shader_resource_view =
+                    match factory.create_texture_const_u8::<ColorFormat>(
+                        load_data.kind,
+                        &[load_data.raw],
+                    ) {
+                        Ok((_, shader_resource_view)) => shader_resource_view,
+                        Err(_) => return None,
+                    };
+                let texture = amethyst_renderer::Texture::Texture(shader_resource_view);
+                TextureImpl::OpenGL { texture: texture }
+            }
+            #[cfg(windows)]
+            FactoryImpl::Direct3D {} => unimplemented!(),
+            FactoryImpl::Null => TextureImpl::Null,
+        };
+        Some(Texture { texture_impl: texture_impl })
+    }
+}
+
+/// A struct for creating a new texture from raw data
 pub struct TextureLoadData<'a> {
     pub kind: Kind,
     pub raw: &'a [&'a [<<ColorFormat as Formatted>::Surface as SurfaceTyped>::DataType]],
