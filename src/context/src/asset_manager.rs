@@ -15,7 +15,15 @@ use self::gfx::Factory;
 use self::gfx::format::{Formatted, SurfaceTyped};
 use self::amethyst_renderer::VertexPosNormal;
 use self::amethyst_renderer::target::ColorFormat;
-use self::amethyst_ecs::{World, Component, Storage, VecStorage, Allocator, Entity, MaskedStorage};
+use self::amethyst_ecs::{
+    World,
+    Component,
+    Storage,
+    VecStorage,
+    Allocator,
+    Entity,
+    MaskedStorage,
+};
 
 use self::genmesh::generators::{SphereUV, Cube};
 use self::genmesh::{MapToVertices, Triangulate, Vertices};
@@ -52,7 +60,17 @@ pub trait AssetLoaderRaw: Sized {
 
 /// A trait for loading assets from arbitrary data
 pub trait AssetLoader<A> {
-    fn from_data(assets: &mut Assets, data: Self) -> Option<A>;
+    fn from_data(
+        asset_store: &mut Assets,
+        data: Self,
+    ) -> Option<A> where Self: Sized;
+
+    fn load_from_data(
+        asset_manager: &mut AssetManager,
+        data: Self,
+    ) -> Option<A> where Self: Sized {
+        Self::from_data(&mut *asset_manager, data)
+    }
 }
 
 /// A trait for asset stores which are permanent storages for assets
@@ -118,7 +136,15 @@ impl Assets {
     }
 
     /// Read the storage of all assets for a certain type
-    pub fn read_assets<A: Any + Send + Sync>(&self) -> Storage<Asset<A>, RwLockReadGuard<Allocator>, RwLockReadGuard<MaskedStorage<Asset<A>>>> {
+    pub fn read_assets<A: Any + Send + Sync>(
+        &self
+    ) ->
+        Storage<
+            Asset<A>,
+            RwLockReadGuard<Allocator>,
+            RwLockReadGuard<MaskedStorage<Asset<A>>>,
+        >
+    {
         self.assets.read()
     }
 
@@ -139,11 +165,17 @@ impl Assets {
     }
 }
 
+// TODO: extract this out to a trait so you can have a wrapper that restricts
+//       which stores you can access, since when passing this to AssetLoaders we
+//       want to have cascading asset loads only come from the same store.
 /// Asset manager which handles assets and loaders.
 pub struct AssetManager {
     assets: Assets,
     asset_type_ids: HashMap<(String, AssetTypeId), SourceTypeId>,
-    closures: HashMap<(AssetTypeId, SourceTypeId), Box<FnMut(&mut Assets, &str, &[u8]) -> Option<AssetId>>>,
+    closures: HashMap<
+        (AssetTypeId, SourceTypeId),
+        fn(&mut AssetManager, &str, &[u8]) -> Option<AssetId>,
+    >,
     stores: Vec<Box<AssetStore>>,
 }
 
@@ -162,19 +194,27 @@ impl AssetManager {
     pub fn register_loader<A: Any + Send + Sync, S: Any>(&mut self, asset: &str)
         where S: AssetLoader<A> + AssetLoaderRaw
     {
+        fn load_one<IA: Any + Send + Sync, IS: Any>(
+            loader: &mut AssetManager,
+            name: &str,
+            raw: &[u8],
+        ) -> Option<AssetId> 
+            where IS: AssetLoader<IA> + AssetLoaderRaw
+        {
+            IS::from_raw(loader, raw)
+                .and_then(|data| {
+                    AssetLoader::<IA>::load_from_data(loader, data)
+                })
+                .map(|asset| loader.add_asset(name, asset))
+        }
+
         let asset_id = TypeId::of::<A>();
         let source_id = TypeId::of::<S>();
 
-        self.closures.insert((asset_id, source_id),
-                             Box::new(|loader: &mut Assets, name: &str, raw: &[u8]| {
-            S::from_raw(loader, raw)
-                .and_then(|data| {
-                    AssetLoader::<A>::from_data(loader, data)
-                })
-                .and_then(|asset| {
-                    Some(loader.add_asset(name, asset))
-                })
-        }));
+        self.closures.insert(
+            (asset_id, source_id),
+            load_one::<A, S>,
+        );
 
         self.asset_type_ids.insert((asset.into(), asset_id), source_id);
     }
@@ -190,14 +230,20 @@ impl AssetManager {
     pub fn load_asset_from_raw<A: Any + Send + Sync>(&mut self, name: &str, asset_type: &str, raw: &[u8]) -> Option<AssetId> {
         let asset_type_id = TypeId::of::<A>();
         let &source_id = self.asset_type_ids.get(&(asset_type.into(), asset_type_id)).expect("Unregistered asset type id");
-        let ref mut loader = self.closures.get_mut(&(asset_type_id, source_id)).unwrap();
-        loader(&mut self.assets, name, raw)
+        let loader = *self.closures.get(&(asset_type_id, source_id)).unwrap();
+        loader(self, name, raw)
     }
 
     /// Load an asset from the asset stores
-    pub fn load_asset<A: Any + Send + Sync>(&mut self, name: &str, asset_type: &str) -> Option<AssetId> {
+    pub fn load_asset<A: Any + Send + Sync>(
+        &mut self,
+        name: &str,
+        asset_type: &str,
+    ) -> Option<AssetId> {
         let mut buf = Vec::new();
-        if let Some(store) = self.stores.iter().find(|store| store.has_asset(name, asset_type)) {
+        if let Some(store) = self.stores.iter()
+            .find(|store| store.has_asset(name, asset_type))
+        {
             store.load_asset(name, asset_type, &mut buf);
         } else {
             return None;
@@ -509,6 +555,18 @@ pub enum TextureImpl {
 #[derive(Clone)]
 pub struct Texture {
     texture_impl: TextureImpl,
+}
+
+pub struct NullStorage;
+
+impl AssetStore for NullStorage {
+    fn has_asset(&self, _: &str, _: &str) -> bool {
+        false
+    }
+
+    fn load_asset(&self, _: &str, _: &str, _: &mut Vec<u8>) -> Option<usize> {
+        None
+    }
 }
 
 /// Asset store representing a file directory.
