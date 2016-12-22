@@ -160,7 +160,7 @@ impl Assets {
         }
     }
 
-    fn add_asset<A: Any + Send + Sync>(&mut self, name: &str, asset: A) -> AssetId {
+    pub fn add_asset<A: Any + Send + Sync>(&mut self, name: &str, asset: A) -> AssetId {
         *self.asset_ids.entry(name.into()).or_insert(self.assets.create_now().with(Asset::<A>(asset)).build())
     }
 }
